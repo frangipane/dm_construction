@@ -6,53 +6,44 @@ import dm_construction
 from helpers import show_rgb_observation
 
 
-class DiscreteRelativePolicy:
-    def __init__(self, ob_spec, ac_spec):
-        self.ob_spec = ob_spec
+class RandomAgent:
+    def __init__(self, ac_spec):
         self.ac_spec = ac_spec
 
-        self.x_action_min = ac_spec['x_action'].minimum
-        self.x_action_max = ac_spec['x_action'].maximum
-
     def act(self, obs):
-        pass
+        action = {}
 
+        for name, spec in self.ac_spec.items():
+            if name == "Index":
+                # graph observation -> sample edge Index
+                #value = np.random.randint(obs["n_edge"])
 
-class RandomAgent(DiscreteRelativePolicy):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-    def act(self, obs):
-
-        # constrict random choice to available blocks
-        moved_block = np.random.randint(7)
-        base_block = len(obs["nodes"]) - 1
-        edge_index = list(
-            zip(obs["senders"], obs["receivers"])).index((moved_block, base_block))
-
-        action = {
-            "Index": edge_index,
-            "sticky": np.random.choice([0,1]),
-            "x_action": np.random.randint(
-                self.x_action_min,
-                self.x_action_max + 1
-            )
-        }
+                # for "smarter" random agent, restrict random choice to available blocks
+                moved_block = np.random.randint(7)
+                base_block = len(obs["nodes"]) - 1
+                value = list(
+                    zip(obs["senders"], obs["receivers"])).index((moved_block, base_block))
+            elif spec.dtype in (np.int32, np.int64, int):
+                # discrete action
+                value = np.random.randint(spec.minimum, spec.maximum + 1)
+            else:
+                # continuous action
+                value = np.random.uniform(spec.minimum, spec.maximum)
+            action[name] = value
         return action
 
 
-def train(task,
-          wrapper,
-          difficulty,
-          seed,
-          random_agent=True,
-          ):
+def rollout(task,
+            wrapper,
+            difficulty,
+            seed,
+            num_steps=6,
+            random_agent=True,):
 
     # Create the environment
     env = dm_construction.get_environment(
         task,
         wrapper_type=wrapper,
-        difficulty=difficulty,
     )
 
     #print(env.observation_spec())
@@ -74,20 +65,31 @@ def train(task,
     'sticky': BoundedArray(shape=(), dtype=dtype('int32'), name=None, minimum=0, maximum=1)}
     """
     if random_agent is True:
-        model = RandomAgent(env.observation_spec(), env.action_spec())
+        model = RandomAgent(env.action_spec())
     else:
         raise NotImplementedError
 
     # start interaction with environment
     np.random.seed(seed)
-    timestep = env.reset()
+    timestep = env.reset(difficulty=difficulty)
 
-    while timestep.step_type != dm_env.StepType.LAST:
+    # record trajectory, actions, rgb images for analysis
+    trajectory = [timestep]
+    actions = [None]
+    rgb_imgs = [env.core_env.last_time_step.observation["RGB"]]
+
+#    while timestep.step_type != dm_env.StepType.LAST:
+    for _ in range(num_steps):
+        if timestep.last():
+            timestep = env.reset(difficulty=difficulty)
         action = model.act(timestep.observation)
         timestep = env.step(action)
-        #show_rgb_observation(env.core_env.last_time_step.observation["RGB"])
+        trajectory.append(timestep)
+        actions.append(action)
+        rgb_imgs.append(env.core_env.last_time_step.observation["RGB"])
 
     env.close()
+    return trajectory, actions, rgb_imgs
 
 
 if __name__ == "__main__":
@@ -111,4 +113,4 @@ if __name__ == "__main__":
                         type=int,
                         default=1234)
     args = parser.parse_args()
-    train(**vars(args))
+    rollout(**vars(args))
