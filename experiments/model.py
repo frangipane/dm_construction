@@ -37,14 +37,21 @@ class RNNEncoder(nn.Module):
         return output, hn
 
     
-class MLPGaussianActor(nn.Module):
+class MLPGaussianActorCritic(nn.Module):
     """
+    Actor-Critic with dual policy and value heads.
+
+    Object observation encoding:
     RNN encodes graph observations by processing the sequence of
     object state vectors in the order they are listed into a single
     vector (the final hidden state).
 
+    Policy:
     An MLP with 4 hidden layers of size 256 units receives the hidden
     state from the RNN as input and outputs a Gaussian policy.
+
+    Value function:
+    An MLP with 2 hidden layers of size 256 units.
     """
     def __init__(self, obs_dim, act_dim, rnn_hidden_size=256, mlp_hidden_size=256):
         super().__init__()
@@ -70,24 +77,42 @@ class MLPGaussianActor(nn.Module):
             nn.Linear(mlp_hidden_size, act_dim)
         )
 
+        # Critic
+        self.v = nn.Sequential(
+            nn.Linear(rnn_hidden_size, mlp_hidden_size),
+            nn.ReLU(),
+            nn.Linear(mlp_hidden_size, mlp_hidden_size),
+            nn.ReLU(),
+            nn.Linear(mlp_hidden_size, 1)
+        )
+
     def forward(self, obs, act=None):
         # Produce action distributions for given observations, and 
         # optionally compute the log likelihood of given actions under
         # those distributions.
-        pi = self._distribution(obs)
+        _, hn = self.rnn_encoder(obs)
+        pi = self._distribution(hn)
+        v = torch.squeeze(self.v(hn), -1)
         logp_a = None
         if act is not None:
             logp_a = self._log_prob_from_distribution(pi, act)
-        return pi, logp_a
+        return pi, v, logp_a
 
-    def _distribution(self, obs):
-        _, hn = self.rnn_encoder(obs)
-        mu = self.mu_net(hn)
+    def _distribution(self, obs_embed):
+        mu = self.mu_net(obs_embed)
         std = torch.exp(self.log_std)
         return Normal(mu, std)
 
     def _log_prob_from_distribution(self, pi, act):
         return pi.log_prob(act)
+
+    @staticmethod
+    def _action_to_dict(a):
+        a = a.squeeze().numpy()
+        return {'Horizontal': a[0],
+                'Vertical': a[1],
+                'Sticky': a[2],
+                'Selector': a[3]}
 
     # def initHidden(self):
     #     pass
@@ -103,10 +128,13 @@ def wrapper_type_from_ac_spec(ac_spec):
         raise ValueError("Unrecognized action spec")
 
 
-class RNNEncoderMLPGaussianActor(nn.Module):
+class ActorCritic(nn.Module):
 
     def __init__(self, ob_spec, ac_spec):
         super().__init__()
+
+        assert 'nodes' in ob_spec, \
+            "Only graph obs supported"
 
         obs_dim = ob_spec["nodes"].shape[1]  # 18 for all tasks except marble run
         ac_spec_type = wrapper_type_from_ac_spec(ac_spec)
@@ -115,39 +143,31 @@ class RNNEncoderMLPGaussianActor(nn.Module):
 
         # policy builder depends on action space
         if ac_spec_type == 'continuous_absolute':
-            self.pi = MLPGaussianActor(obs_dim=obs_dim,
-                                       act_dim=4,
-                                       rnn_hidden_size=256,
-                                       mlp_hidden_size=256)
+            self.ac = MLPGaussianActorCritic(obs_dim=obs_dim,
+                                             act_dim=4,
+                                             rnn_hidden_size=256,
+                                             mlp_hidden_size=256)
         else:
             raise NotImplementedError
 
-        # TODO: add critic/value fxn module
-
     def step(self, obs):
         with torch.no_grad():
-            pi = self.pi._distribution(obs)
+            _, obs_embed = self.ac.rnn_encoder(obs)
+            pi = self.ac._distribution(obs_embed)
             a = pi.sample()
-            logp_a = self.pi._log_prob_from_distribution(pi, a)
-        return self._action_to_dict(a), logp_a.numpy()
+            logp_a = self.ac._log_prob_from_distribution(pi, a)
+            v = torch.squeeze(self.ac.v(obs_embed), -1)
+        return self.ac._action_to_dict(a), v.numpy(), logp_a.numpy()
 
     def act(self, obs):
         return self.step(obs)[0]
-
-    @staticmethod
-    def _action_to_dict(a):
-        a = a.squeeze().numpy()
-        return {'Horizontal': a[0],
-                'Vertical': a[1],
-                'Sticky': a[2],
-                'Selector': a[3]}
 
 
 def mixed_wrapper_rollout(task,
                           difficulty,
                           seed,
                           num_steps=6,
-                          model_constructor=RNNEncoderMLPGaussianActor
+                          model_constructor=ActorCritic
                           ):
     """
     Rollout with graph observations but continuous actions, with
