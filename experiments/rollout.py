@@ -55,23 +55,32 @@ class ContinuousAbsoluteGraphWrapper(DiscreteRelativeGraphWrapper):
         return self.ca_env.action_spec()
 
 
-def mixed_wrapper_rollout(task,
-                          difficulty,
-                          seed,
-                          num_steps=6,
-                          model_constructor=model.ActorCritic
-                          ):
+def rollout(task="covering",
+            difficulty=0,
+            seed=1234,
+            num_steps=6,
+            model_constructor=model.ActorCritic,
+            env_wrapper="mixed"
+            ):
     """
     Rollout with graph observations but continuous actions, with
     observations coming from `discrete_relative` wrapper, and actions
     invoked through `continuous_absolute` wrapper.
     """
+
     # Create the environment
-    unity_env = dm_construction.get_unity_environment(backend="docker")
-    task_env = dm_construction.get_task_environment(unity_env, problem_type=task,)
-    env = ContinuousAbsoluteGraphWrapper(task_env)
+    if env_wrapper == "mixed":
+        unity_env = dm_construction.get_unity_environment(backend="docker")
+        task_env = dm_construction.get_task_environment(unity_env, problem_type=task,)
+        env = ContinuousAbsoluteGraphWrapper(task_env)
+    elif env_wrapper in dm_construction.ALL_WRAPPERS:
+        env = dm_construction.get_environment(task, wrapper_type=env_wrapper)
+    else:
+        raise ValueError(f"Unrecognized wrapper type {env_wrapper}")
 
     # Create model
+    # only continuous_absolute is supported, so model init will throw error
+    # for discrete_relative
     model = model_constructor(ob_spec=env.observation_spec(),
                               ac_spec=env.action_spec())
 
@@ -82,7 +91,7 @@ def mixed_wrapper_rollout(task,
     # record trajectory, actions, rgb images for analysis
     trajectory = [timestep]
     actions = [None]
-    rgb_imgs = [task_env.last_time_step.observation["RGB"]]
+    rgb_imgs = [env._env.last_time_step.observation["RGB"]]
 
 #    while timestep.step_type != dm_env.StepType.LAST:
     for _ in range(num_steps):
@@ -97,11 +106,13 @@ def mixed_wrapper_rollout(task,
         # Update record
         trajectory.append(timestep)
         actions.append(action)
-        rgb_imgs.append(task_env.last_time_step.observation["RGB"])
+        rgb_imgs.append(env._env.last_time_step.observation["RGB"])
 
     env.close()
     return trajectory, actions, rgb_imgs
 
 
 if __name__ == "__main__":
-    mixed_wrapper_rollout("covering", 0, 1234, 6)
+    import fire
+    fire.Fire(rollout)
+
