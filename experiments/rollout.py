@@ -26,6 +26,7 @@ action_spec() ==>
 
 """
 import numpy as np
+import torch
 
 import dm_construction
 from dm_construction.wrappers.discrete_relative import DiscreteRelativeGraphWrapper
@@ -82,7 +83,9 @@ def rollout(task="covering",
     # only continuous_absolute is supported, so model init will throw error
     # for discrete_relative
     model = model_constructor(ob_spec=env.observation_spec(),
-                              ac_spec=env.action_spec())
+                              ac_spec=env.action_spec(),
+                              embed_size=64,
+                              mlp_hidden_size=64)
 
     # start interaction with environment
     np.random.seed(seed)
@@ -98,10 +101,12 @@ def rollout(task="covering",
         if timestep.last():
             timestep = env.reset(difficulty=difficulty)
 
-        action = model.act(timestep.observation)
+        raw_action = model.act(timestep.observation)
+        action = model.action_to_dict(raw_action)
 
         # Take action via continous_absolute wrapper
         timestep = env.step(action)
+        #import pdb; pdb.set_trace()
 
         # Update record
         trajectory.append(timestep)
