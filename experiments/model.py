@@ -33,7 +33,8 @@ class CNNEncoder(nn.Module):
 
     def forward(self, obs):
         x = torch.as_tensor(obs, dtype=torch.float32)
-        x = x.unsqueeze(0)  # TODO: change when batch size > 1
+        if x.dim() == 3:
+            x = x.unsqueeze(0)  # add batch size as 0th dim
         x = x.transpose(1, 3).transpose(2, 3)
         x = self.image_conv(x)
         x = x.reshape(x.shape[0], -1)
@@ -134,7 +135,7 @@ class MLPGaussianActorCritic(nn.Module):
         # Produce action distributions for given observations, and 
         # optionally compute the log likelihood of given actions under
         # those distributions.
-        obs_emb = self.encoder(obs)
+        obs_embed = self.encoder(obs)
         pi = self._distribution(obs_embed)
         v = torch.squeeze(self.v(obs_embed), -1)
         logp_a = None
