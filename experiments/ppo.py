@@ -114,11 +114,10 @@ class PPOBuffer:
         return {k: torch.as_tensor(v, dtype=torch.float32) for k,v in data.items()}
 
 
-
 def ppo(task, actor_critic=model.ActorCritic, ac_kwargs=dict(), seed=0, 
-        steps_per_epoch=4000, epochs=50, gamma=0.99, clip_ratio=0.2, pi_lr=3e-4,
-        vf_lr=1e-3, train_pi_iters=80, train_v_iters=80, lam=0.97, max_ep_len=1000,
-        target_kl=0.01, logger_kwargs=dict(), save_freq=10):
+        steps_per_epoch=4000, epochs=50, gamma=0.99, clip_ratio=0.2, lr=3e-4,
+        v_loss_coeff=0.5, train_iters=80, lam=0.97, max_ep_len=1000,
+        target_kl=0.01, logger_kwargs=dict(), save_freq=10, wrapper_type="continuous_absolute"):
     """
     Proximal Policy Optimization (by clipping), 
 
@@ -235,9 +234,12 @@ def ppo(task, actor_critic=model.ActorCritic, ac_kwargs=dict(), seed=0,
     np.random.seed(seed)
 
     # Instantiate environment
-    env = dm_construction.get_environment(task, wrapper_type="continuous_absolute")
+    env = dm_construction.get_environment(task, wrapper_type=wrapper_type)
     obs_dim = env.observation_spec().shape
-    act_dim = 4  # for continuous absolute action space
+    if wrapper_type == "continuous_absolute":
+        act_dim = 4  # for continuous absolute action space
+    else:
+        raise NotImplementedError
 
     # Create actor-critic module
     ac = actor_critic(env.observation_spec(), env.action_spec(), **ac_kwargs)
@@ -253,33 +255,29 @@ def ppo(task, actor_critic=model.ActorCritic, ac_kwargs=dict(), seed=0,
     local_steps_per_epoch = int(steps_per_epoch / num_procs())
     buf = PPOBuffer(obs_dim, act_dim, local_steps_per_epoch, gamma, lam)
 
-    # Set up function for computing PPO policy loss
-    def compute_loss_pi(data):
-        obs, act, adv, logp_old = data['obs'], data['act'], data['adv'], data['logp']
+    def compute_loss(data):
+        obs, act, adv, logp_old, ret = data['obs'], data['act'], data['adv'], data['logp'], data['ret']
+        pi, v, logp = ac.ac(obs, act)
 
-        # Policy loss
-        pi, logp = ac.pi(obs, act)
+        # value loss (just MSE)
+        loss_v = ((v - ret)**2).mean()
+
+        # policy loss
         ratio = torch.exp(logp - logp_old)
         clip_adv = torch.clamp(ratio, 1-clip_ratio, 1+clip_ratio) * adv
         loss_pi = -(torch.min(ratio * adv, clip_adv)).mean()
 
-        # Useful extra info
+        # useful extra info re: policy
         approx_kl = (logp_old - logp).mean().item()
         ent = pi.entropy().mean().item()
         clipped = ratio.gt(1+clip_ratio) | ratio.lt(1-clip_ratio)
         clipfrac = torch.as_tensor(clipped, dtype=torch.float32).mean().item()
         pi_info = dict(kl=approx_kl, ent=ent, cf=clipfrac)
 
-        return loss_pi, pi_info
-
-    # Set up function for computing value loss
-    def compute_loss_v(data):
-        obs, ret = data['obs'], data['ret']
-        return ((ac.v(obs) - ret)**2).mean()
+        return loss_v, loss_pi, pi_info
 
     # Set up optimizers for policy and value function
-    #pi_optimizer = Adam(ac.pi.parameters(), lr=pi_lr)
-    #vf_optimizer = Adam(ac.v.parameters(), lr=vf_lr)
+    optimizer = Adam(ac.ac.parameters(), lr=lr)
 
     # Set up model saving
     logger.setup_pytorch_saver(ac)
@@ -287,31 +285,25 @@ def ppo(task, actor_critic=model.ActorCritic, ac_kwargs=dict(), seed=0,
     def update():
         data = buf.get()
 
-        pi_l_old, pi_info_old = compute_loss_pi(data)
+        v_l_old, pi_l_old, pi_info_old = compute_loss(data)
         pi_l_old = pi_l_old.item()
-        v_l_old = compute_loss_v(data).item()
+        vl_l_old = v_l_old.item()
 
         # Train policy with multiple steps of gradient descent
-        for i in range(train_pi_iters):
-            pi_optimizer.zero_grad()
-            loss_pi, pi_info = compute_loss_pi(data)
+        for i in range(train_iters):
+            optimizer.zero_grad()
+            loss_v, loss_pi, pi_info = compute_loss(data)
             kl = mpi_avg(pi_info['kl'])
             if kl > 1.5 * target_kl:
-                logger.log('Early stopping at step %d due to reaching max kl.'%i)
+                logger.log(f'Early stopping at step {i} due to reaching max kl.')
                 break
-            loss_pi.backward()
-            mpi_avg_grads(ac.pi)    # average grads across MPI processes
-            pi_optimizer.step()
+
+            loss = loss_pi + loss_v * v_loss_coeff
+            loss.backward()
+            mpi_avg_grads(ac.ac)  # average grads across MPI processes
+            optimizer.step()
 
         logger.store(StopIter=i)
-
-        # Value function learning
-        for i in range(train_v_iters):
-            vf_optimizer.zero_grad()
-            loss_v = compute_loss_v(data)
-            loss_v.backward()
-            mpi_avg_grads(ac.v)    # average grads across MPI processes
-            vf_optimizer.step()
 
         # Log changes from update
         kl, ent, cf = pi_info['kl'], pi_info_old['ent'], pi_info['cf']
@@ -319,13 +311,14 @@ def ppo(task, actor_critic=model.ActorCritic, ac_kwargs=dict(), seed=0,
                      KL=kl, Entropy=ent, ClipFrac=cf,
                      DeltaLossPi=(loss_pi.item() - pi_l_old),
                      DeltaLossV=(loss_v.item() - v_l_old))
-
+        
     # Prepare for interaction with environment
     start_time = time.time()
     timestep, ep_ret, ep_len = env.reset(difficulty=0), 0, 0
 
     # Main loop: collect experience in env and update/log each epoch
     for epoch in range(epochs):
+        encountered_terminal = False
         for t in range(local_steps_per_epoch):
             a, v, logp = ac.step(timestep.observation)
 
@@ -348,7 +341,7 @@ def ppo(task, actor_critic=model.ActorCritic, ac_kwargs=dict(), seed=0,
 
             if terminal or epoch_ended:
                 if epoch_ended and not(terminal):
-                    print('Warning: trajectory cut off by epoch at %d steps.'%ep_len, flush=True)
+                    print(f'Warning: trajectory cut off by epoch at {ep_len} steps.', flush=True)
                 # if trajectory didn't reach terminal state, bootstrap value target
                 if timeout or epoch_ended:
                     _, v, _ = ac.step(timestep.observation)
@@ -356,8 +349,9 @@ def ppo(task, actor_critic=model.ActorCritic, ac_kwargs=dict(), seed=0,
                     v = 0
                 buf.finish_path(v)
                 if terminal:
-                    # only save EpRet / EpLen if trajectory finished
+                    # only save EpRet / EpLen if trajectory finished.
                     logger.store(EpRet=ep_ret, EpLen=ep_len)
+                    encountered_terminal = True
                 timestep, ep_ret, ep_len = env.reset(difficulty=0), 0, 0
 
         # Save model
@@ -365,23 +359,26 @@ def ppo(task, actor_critic=model.ActorCritic, ac_kwargs=dict(), seed=0,
             logger.save_state({'env': env}, None)
 
         # Perform PPO update!
-        #update()
-        _ = buf.get()  # TODO: delete when we uncomment update(), call to reset buf.
+        update()
 
         # Log info about epoch
         logger.log_tabular('Epoch', epoch)
-        logger.log_tabular('EpRet', with_min_and_max=True)
-        logger.log_tabular('EpLen', average_only=True)
+        if encountered_terminal:
+            # Note, if local_steps_per_epoch is too small so no terminal state
+            # has been encountered, then ep_ret and ep_len will not
+            # be stored before call to log_tabular, resulting in error.
+            logger.log_tabular('EpRet', with_min_and_max=True)
+            logger.log_tabular('EpLen', average_only=True)
         logger.log_tabular('VVals', with_min_and_max=True)
         logger.log_tabular('TotalEnvInteracts', (epoch + 1) * steps_per_epoch)
-        #logger.log_tabular('LossPi', average_only=True)
-        #logger.log_tabular('LossV', average_only=True)
-        #logger.log_tabular('DeltaLossPi', average_only=True)
-        #logger.log_tabular('DeltaLossV', average_only=True)
-        #logger.log_tabular('Entropy', average_only=True)
-        #logger.log_tabular('KL', average_only=True)
-        #logger.log_tabular('ClipFrac', average_only=True)
-        #logger.log_tabular('StopIter', average_only=True)
+        logger.log_tabular('LossPi', average_only=True)
+        logger.log_tabular('LossV', average_only=True)
+        logger.log_tabular('DeltaLossPi', average_only=True)
+        logger.log_tabular('DeltaLossV', average_only=True)
+        logger.log_tabular('Entropy', average_only=True)
+        logger.log_tabular('KL', average_only=True)
+        logger.log_tabular('ClipFrac', average_only=True)
+        logger.log_tabular('StopIter', average_only=True)
         logger.log_tabular('Time', time.time()-start_time)
         logger.dump_tabular()
 
@@ -390,15 +387,24 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--task', type=str, default='covering')
-    parser.add_argument('--wrapper', type=str, default='continuous_absolute')
-    parser.add_argument('--hid', type=int, default=64)
-    parser.add_argument('--embed_sz', type=int, default=64)
+    parser.add_argument('--wrapper-type', type=str, default='continuous_absolute')
     parser.add_argument('--gamma', type=float, default=0.99)
     parser.add_argument('--seed', '-s', type=int, default=0)
+    parser.add_argument('--steps-per-epoch', type=int, default=1000,
+                        help="Number of steps of interaction per epoch")
+    parser.add_argument('--epochs', type=int, default=10)
     parser.add_argument('--cpu', type=int, default=4)
-    parser.add_argument('--steps', type=int, default=20)
-    parser.add_argument('--epochs', type=int, default=5)
     parser.add_argument('--exp_name', type=str, default='ppo')
+    parser.add_argument('--hid', type=int, default=64)
+    parser.add_argument('--embed_sz', type=int, default=64)
+
+    # wandb logging
+    # parser.add_argument("--wandb", type=str, default="dmc",
+    #                     help="wandb project to output run")
+    # parser.add_argument("--wandb-name-suffix", type=str, default=None,
+    #                     help="suffix to append to wandb run name")
+    # parser.add_argument("--wandb-notes", type=str, default=None,
+    #                     help="description associated with wandb run")
     args = parser.parse_args()
 
     mpi_fork(args.cpu)  # run parallel code with mpi
@@ -408,5 +414,5 @@ if __name__ == '__main__':
 
     ppo(task=args.task, actor_critic=model.ActorCritic,
         ac_kwargs=dict(mlp_hidden_size=args.hid, embed_size=args.embed_sz), gamma=args.gamma, 
-        seed=args.seed, steps_per_epoch=args.steps, epochs=args.epochs,
+        seed=args.seed, steps_per_epoch=args.steps_per_epoch, epochs=args.epochs,
         logger_kwargs=logger_kwargs)
