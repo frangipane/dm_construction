@@ -9,6 +9,7 @@ from spinup.utils.logx import EpochLogger
 from spinup.utils.mpi_pytorch import setup_pytorch_for_mpi, sync_params, mpi_avg_grads
 from spinup.utils.mpi_tools import mpi_fork, mpi_avg, proc_id, mpi_statistics_scalar, num_procs
 
+import wandb
 import model
 import dm_construction
 
@@ -380,6 +381,9 @@ def ppo(task, actor_critic=model.ActorCritic, ac_kwargs=dict(), seed=0,
         logger.log_tabular('ClipFrac', average_only=True)
         logger.log_tabular('StopIter', average_only=True)
         logger.log_tabular('Time', time.time()-start_time)
+
+        if proc_id()==0:
+            wandb.log(logger.log_current_row, step=epoch)
         logger.dump_tabular()
 
 
@@ -398,16 +402,15 @@ if __name__ == '__main__':
     parser.add_argument('--hid', type=int, default=64)
     parser.add_argument('--embed_sz', type=int, default=64)
 
-    # wandb logging
-    # parser.add_argument("--wandb", type=str, default="dmc",
-    #                     help="wandb project to output run")
-    # parser.add_argument("--wandb-name-suffix", type=str, default=None,
-    #                     help="suffix to append to wandb run name")
-    # parser.add_argument("--wandb-notes", type=str, default=None,
-    #                     help="description associated with wandb run")
     args = parser.parse_args()
 
     mpi_fork(args.cpu)  # run parallel code with mpi
+
+    if proc_id() == 0:
+        wandb_run_name = args.task + '-' + time.strftime("%Y%m%d_%H%M")
+        wandb.init(project="dmc",
+                   name=wandb_run_name,
+                   config=vars(args),)
 
     from spinup.utils.run_utils import setup_logger_kwargs
     logger_kwargs = setup_logger_kwargs(args.exp_name, args.seed)
