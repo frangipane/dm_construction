@@ -32,8 +32,9 @@ class CNNEncoder(nn.Module):
         return ((self.height-1)//2-2)*((self.width-1)//2-2)*64
 
     def forward(self, obs):
-        x = torch.tensor(obs, dtype=torch.float32)
-        x = x.unsqueeze(0)  # TODO: change when batch size > 1
+        x = torch.as_tensor(obs, dtype=torch.float32)
+        if x.dim() == 3:
+            x = x.unsqueeze(0)  # add batch size as 0th dim
         x = x.transpose(1, 3).transpose(2, 3)
         x = self.image_conv(x)
         x = x.reshape(x.shape[0], -1)
@@ -134,7 +135,7 @@ class MLPGaussianActorCritic(nn.Module):
         # Produce action distributions for given observations, and 
         # optionally compute the log likelihood of given actions under
         # those distributions.
-        obs_emb = self.encoder(obs)
+        obs_embed = self.encoder(obs)
         pi = self._distribution(obs_embed)
         v = torch.squeeze(self.v(obs_embed), -1)
         logp_a = None
@@ -148,15 +149,7 @@ class MLPGaussianActorCritic(nn.Module):
         return Normal(mu, std)
 
     def _log_prob_from_distribution(self, pi, act):
-        return pi.log_prob(act)
-
-    @staticmethod
-    def _action_to_dict(a):
-        a = a.squeeze().numpy()
-        return {'Horizontal': a[0],
-                'Vertical': a[1],
-                'Sticky': a[2],
-                'Selector': a[3]}
+        return pi.log_prob(act).sum(axis=-1)
 
     # def initHidden(self):
     #     pass
@@ -194,7 +187,7 @@ def wrapper_type_from_ob_spec(ob_spec):
 
 class ActorCritic(nn.Module):
 
-    def __init__(self, ob_spec, ac_spec):
+    def __init__(self, ob_spec, ac_spec, embed_size=None, mlp_hidden_size=256):
         super().__init__()
 
         ob_type, ob_dim = wrapper_type_from_ob_spec(ob_spec)
@@ -204,11 +197,11 @@ class ActorCritic(nn.Module):
 
         # policy builder depends on action space
         if ac_type == 'continuous_absolute':
-            embed_size = 256 if ob_type == 'graph' else None
+            embed_size = embed_size if ob_type == 'graph' else None
             self.ac = MLPGaussianActorCritic(obs_dim=ob_dim,
                                              act_dim=4,
                                              ob_type=ob_type,
-                                             mlp_hidden_size=256,
+                                             mlp_hidden_size=mlp_hidden_size,
                                              encoder_embedding_size=embed_size)
         else:
             raise NotImplementedError(f"Model does not support {ac_type} actions")
@@ -220,7 +213,16 @@ class ActorCritic(nn.Module):
             a = pi.sample()
             logp_a = self.ac._log_prob_from_distribution(pi, a)
             v = torch.squeeze(self.ac.v(obs_embed), -1)
-        return self.ac._action_to_dict(a), v.numpy(), logp_a.numpy()
+        return a.squeeze().numpy(), v.numpy(), logp_a.squeeze().numpy()
 
     def act(self, obs):
         return self.step(obs)[0]
+
+    @staticmethod
+    def action_to_dict(a):
+        # a is a numpy vector
+        return {'Horizontal': a[0],
+                'Vertical': a[1],
+                'Sticky': a[2],
+                'Selector': a[3]}
+
