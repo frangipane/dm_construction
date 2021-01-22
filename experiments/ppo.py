@@ -324,7 +324,7 @@ def ppo(task, actor_critic=model.ActorCritic, ac_kwargs=dict(), seed=0,
         for t in range(local_steps_per_epoch):
             a, v, logp = ac.step(timestep.observation)
 
-            next_timestep = env.step(ac.action_to_dict(a))
+            next_timestep = env.step(ac.action_to_dict(a, rescale=True))
             r = timestep.reward
             d = next_timestep.last()  # TODO: check if r, d are assoc w/ correct timestep
             ep_ret += r
@@ -391,11 +391,10 @@ def ppo(task, actor_critic=model.ActorCritic, ac_kwargs=dict(), seed=0,
                     'ac_state_dict': ac.ac.state_dict(),
                     'optimizer': optimizer.state_dict(),
                 }
-                # hack for wandb: should output the model in the wandb.run.dir to avoid
-                # problems syncing the model in the cloud with wandb's files
+                # output the model in the wandb.run.dir to avoid problems
+                # syncing the model in the cloud with wandb's files
                 state_fname = os.path.join(wandb.run.dir, "state_dict.pt")
                 torch.save(state, state_fname)
-                #wandb.save(state_fname)
 
         if proc_id()==0:
             wandb.log(logger.log_current_row, step=epoch)
