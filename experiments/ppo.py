@@ -333,6 +333,11 @@ def ppo(task, actor_critic=model.ActorCritic, ac_kwargs=dict(), seed=0,
             # save and log
             buf.store(timestep.observation, a, r, v, logp)
             logger.store(VVals=v)
+
+            # TODO debugging
+            logger.store(AHor=a[0])
+            logger.store(AVer=a[1])
+            logger.store(ASel=a[3])
             
             # Update obs (critical!)
             timestep = next_timestep
@@ -378,6 +383,11 @@ def ppo(task, actor_critic=model.ActorCritic, ac_kwargs=dict(), seed=0,
         logger.log_tabular('ClipFrac', average_only=True)
         logger.log_tabular('StopIter', average_only=True)
         logger.log_tabular('Time', time.time()-start_time)
+
+        # TODO debugging
+        logger.log_tabular('AHor', with_min_and_max=True)
+        logger.log_tabular('AVer', with_min_and_max=True)
+        logger.log_tabular('ASel', with_min_and_max=True)
 
         # Save model
         if (epoch % save_freq == 0 and epoch > 0) or (epoch == epochs-1):
