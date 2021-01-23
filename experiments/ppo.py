@@ -322,7 +322,10 @@ def ppo(task, actor_critic=model.ActorCritic, ac_kwargs=dict(), seed=0,
     for epoch in range(epochs):
         encountered_terminal = False
         for t in range(local_steps_per_epoch):
-            a, v, logp = ac.step(timestep.observation)
+            # assumes obs is an rgb array: rescale to [0, 1]
+            o = timestep.observation/255.0
+
+            a, v, logp = ac.step(o)
 
             next_timestep = env.step(ac.action_to_dict(a, rescale=True))
             r = timestep.reward
@@ -331,7 +334,7 @@ def ppo(task, actor_critic=model.ActorCritic, ac_kwargs=dict(), seed=0,
             ep_len += 1
 
             # save and log
-            buf.store(timestep.observation, a, r, v, logp)
+            buf.store(o, a, r, v, logp)
             logger.store(VVals=v)
 
             # TODO debugging
@@ -351,7 +354,7 @@ def ppo(task, actor_critic=model.ActorCritic, ac_kwargs=dict(), seed=0,
                     print(f'Warning: trajectory cut off by epoch at {ep_len} steps.', flush=True)
                 # if trajectory didn't reach terminal state, bootstrap value target
                 if timeout or epoch_ended:
-                    _, v, _ = ac.step(timestep.observation)
+                    _, v, _ = ac.step(timestep.observation/255.0)
                 else:
                     v = 0
                 buf.finish_path(v)
