@@ -119,7 +119,8 @@ class PPOBuffer:
 def ppo(task, actor_critic=model.ActorCritic, ac_kwargs=dict(), seed=0, 
         steps_per_epoch=4000, epochs=50, gamma=0.99, clip_ratio=0.2, lr=3e-4,
         v_loss_coeff=0.5, train_iters=80, lam=0.97, max_ep_len=1000,
-        target_kl=0.01, logger_kwargs=dict(), save_freq=10, wrapper_type="continuous_absolute"):
+        target_kl=0.01, logger_kwargs=dict(), save_freq=10, wrapper_type="continuous_absolute",
+        log_wandb=False):
     """
     Proximal Policy Optimization (by clipping), 
 
@@ -396,7 +397,7 @@ def ppo(task, actor_critic=model.ActorCritic, ac_kwargs=dict(), seed=0,
         if (epoch % save_freq == 0 and epoch > 0) or (epoch == epochs-1):
             logger.save_state({'env': env}, None)
 
-            if proc_id()==0:
+            if proc_id()==0 and log_wandb:
                 # Save the model parameters to wandb every save_freq epoch
                 # instead of waiting till the end
                 state = {
@@ -409,7 +410,7 @@ def ppo(task, actor_critic=model.ActorCritic, ac_kwargs=dict(), seed=0,
                 state_fname = os.path.join(wandb.run.dir, "state_dict.pt")
                 torch.save(state, state_fname)
 
-        if proc_id()==0:
+        if proc_id()==0 and log_wandb:
             wandb.log(logger.log_current_row, step=epoch)
         logger.dump_tabular()
 
@@ -429,12 +430,13 @@ if __name__ == '__main__':
     parser.add_argument('--exp_name', type=str, default='ppo')
     parser.add_argument('--hid', type=int, default=64)
     parser.add_argument('--embed_sz', type=int, default=64)
+    parser.add_argument('--log-wandb', help="log to wandb", action="store_true", default=False)
 
     args = parser.parse_args()
 
     mpi_fork(args.cpu)  # run parallel code with mpi
 
-    if proc_id() == 0:
+    if proc_id() == 0 and args.log_wandb:
         wandb_run_name = args.task + '-' + time.strftime("%Y%m%d_%H%M")
         wandb.init(project="dmc",
                    name=wandb_run_name,
@@ -446,4 +448,4 @@ if __name__ == '__main__':
     ppo(task=args.task, actor_critic=model.ActorCritic,
         ac_kwargs=dict(mlp_hidden_size=args.hid, embed_size=args.embed_sz), gamma=args.gamma, 
         seed=args.seed, steps_per_epoch=args.steps_per_epoch, epochs=args.epochs,
-        logger_kwargs=logger_kwargs, save_freq=args.save_freq)
+        logger_kwargs=logger_kwargs, save_freq=args.save_freq, log_wandb=args.log_wandb)
