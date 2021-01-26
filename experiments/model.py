@@ -203,6 +203,11 @@ class ActorCritic(nn.Module):
                                              ob_type=ob_type,
                                              mlp_hidden_size=mlp_hidden_size,
                                              encoder_embedding_size=embed_size)
+
+            # don't assume ordered dict
+            ac_keys = ['Horizontal', 'Vertical', 'Sticky', 'Selector']
+            self.ac_lo = np.array([ac_spec[k].minimum for k in ac_keys])
+            self.ac_hi = np.array([ac_spec[k].maximum for k in ac_keys])
         else:
             raise NotImplementedError(f"Model does not support {ac_type} actions")
 
@@ -218,9 +223,11 @@ class ActorCritic(nn.Module):
     def act(self, obs):
         return self.step(obs)[0]
 
-    @staticmethod
-    def action_to_dict(a):
+    def action_to_dict(self, a, rescale=True):
         # a is a numpy vector
+        if rescale is True:
+            a = self.ac_lo + (self.ac_hi - self.ac_lo) * (np.tanh(a) + 1.)/2.
+
         return {'Horizontal': a[0],
                 'Vertical': a[1],
                 'Sticky': a[2],

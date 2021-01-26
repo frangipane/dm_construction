@@ -119,7 +119,8 @@ class PPOBuffer:
 def ppo(task, actor_critic=model.ActorCritic, ac_kwargs=dict(), seed=0, 
         steps_per_epoch=4000, epochs=50, gamma=0.99, clip_ratio=0.2, lr=3e-4,
         v_loss_coeff=0.5, train_iters=80, lam=0.97, max_ep_len=1000,
-        target_kl=0.01, logger_kwargs=dict(), save_freq=10, wrapper_type="continuous_absolute"):
+        target_kl=0.01, logger_kwargs=dict(), save_freq=10, wrapper_type="continuous_absolute",
+        log_wandb=False):
     """
     Proximal Policy Optimization (by clipping), 
 
@@ -322,17 +323,25 @@ def ppo(task, actor_critic=model.ActorCritic, ac_kwargs=dict(), seed=0,
     for epoch in range(epochs):
         encountered_terminal = False
         for t in range(local_steps_per_epoch):
-            a, v, logp = ac.step(timestep.observation)
+            # assumes obs is an rgb array: rescale to [0, 1]
+            o = timestep.observation/255.0
 
-            next_timestep = env.step(ac.action_to_dict(a))
+            a, v, logp = ac.step(o)
+
+            next_timestep = env.step(ac.action_to_dict(a, rescale=True))
             r = timestep.reward
             d = next_timestep.last()  # TODO: check if r, d are assoc w/ correct timestep
             ep_ret += r
             ep_len += 1
 
             # save and log
-            buf.store(timestep.observation, a, r, v, logp)
+            buf.store(o, a, r, v, logp)
             logger.store(VVals=v)
+
+            # TODO debugging
+            logger.store(AHor=a[0])
+            logger.store(AVer=a[1])
+            logger.store(ASel=a[3])
             
             # Update obs (critical!)
             timestep = next_timestep
@@ -346,7 +355,7 @@ def ppo(task, actor_critic=model.ActorCritic, ac_kwargs=dict(), seed=0,
                     print(f'Warning: trajectory cut off by epoch at {ep_len} steps.', flush=True)
                 # if trajectory didn't reach terminal state, bootstrap value target
                 if timeout or epoch_ended:
-                    _, v, _ = ac.step(timestep.observation)
+                    _, v, _ = ac.step(timestep.observation/255.0)
                 else:
                     v = 0
                 buf.finish_path(v)
@@ -379,11 +388,16 @@ def ppo(task, actor_critic=model.ActorCritic, ac_kwargs=dict(), seed=0,
         logger.log_tabular('StopIter', average_only=True)
         logger.log_tabular('Time', time.time()-start_time)
 
+        # TODO debugging
+        logger.log_tabular('AHor', with_min_and_max=True)
+        logger.log_tabular('AVer', with_min_and_max=True)
+        logger.log_tabular('ASel', with_min_and_max=True)
+
         # Save model
         if (epoch % save_freq == 0 and epoch > 0) or (epoch == epochs-1):
             logger.save_state({'env': env}, None)
 
-            if proc_id()==0:
+            if proc_id()==0 and log_wandb:
                 # Save the model parameters to wandb every save_freq epoch
                 # instead of waiting till the end
                 state = {
@@ -391,13 +405,12 @@ def ppo(task, actor_critic=model.ActorCritic, ac_kwargs=dict(), seed=0,
                     'ac_state_dict': ac.ac.state_dict(),
                     'optimizer': optimizer.state_dict(),
                 }
-                # hack for wandb: should output the model in the wandb.run.dir to avoid
-                # problems syncing the model in the cloud with wandb's files
+                # output the model in the wandb.run.dir to avoid problems
+                # syncing the model in the cloud with wandb's files
                 state_fname = os.path.join(wandb.run.dir, "state_dict.pt")
                 torch.save(state, state_fname)
-                #wandb.save(state_fname)
 
-        if proc_id()==0:
+        if proc_id()==0 and log_wandb:
             wandb.log(logger.log_current_row, step=epoch)
         logger.dump_tabular()
 
@@ -417,12 +430,13 @@ if __name__ == '__main__':
     parser.add_argument('--exp_name', type=str, default='ppo')
     parser.add_argument('--hid', type=int, default=64)
     parser.add_argument('--embed_sz', type=int, default=64)
+    parser.add_argument('--log-wandb', help="log to wandb", action="store_true", default=False)
 
     args = parser.parse_args()
 
     mpi_fork(args.cpu)  # run parallel code with mpi
 
-    if proc_id() == 0:
+    if proc_id() == 0 and args.log_wandb:
         wandb_run_name = args.task + '-' + time.strftime("%Y%m%d_%H%M")
         wandb.init(project="dmc",
                    name=wandb_run_name,
@@ -434,4 +448,4 @@ if __name__ == '__main__':
     ppo(task=args.task, actor_critic=model.ActorCritic,
         ac_kwargs=dict(mlp_hidden_size=args.hid, embed_size=args.embed_sz), gamma=args.gamma, 
         seed=args.seed, steps_per_epoch=args.steps_per_epoch, epochs=args.epochs,
-        logger_kwargs=logger_kwargs, save_freq=args.save_freq)
+        logger_kwargs=logger_kwargs, save_freq=args.save_freq, log_wandb=args.log_wandb)
